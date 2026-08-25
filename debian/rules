@@ -17,12 +17,28 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=-stackprotector
 %:
 	dh $@ --with autoreconf
 
+# libdatachannel is not packaged in Debian: build it at a pinned commit and
+# link it statically, so the binary package depends only on Debian libraries.
+LIBDATACHANNEL_COMMIT = 51085b8de4e6185dc019e3705c88b87933d7c3f6
+LIBDATACHANNEL_PREFIX = $(CURDIR)/debian/libdatachannel-prefix
+
 override_dh_auto_configure:
+	test -f $(LIBDATACHANNEL_PREFIX)/lib/libdatachannel.a || \
+		src/tests/webrtc-nat/build-libdatachannel.sh \
+			--commit=$(LIBDATACHANNEL_COMMIT) --prefix=$(LIBDATACHANNEL_PREFIX) --static
 	dh_auto_configure -- \
 		--disable-silent-rules \
 		--enable-ufw \
 		--enable-completion \
-		--enable-compile-warnings=error
+		--enable-compile-warnings=error \
+		--enable-webrtc \
+		CPPFLAGS="$(CPPFLAGS) -isystem $(LIBDATACHANNEL_PREFIX)/include" \
+		LDFLAGS="$(LDFLAGS) -L$(LIBDATACHANNEL_PREFIX)/lib" \
+		WEBRTC_LIBS="-Wl,-Bstatic -ldatachannel -ljuice -lusrsctp -Wl,-Bdynamic -lssl -lcrypto -lpthread"
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf $(LIBDATACHANNEL_PREFIX)
 
 override_dh_perl:
 	# mosh only uses Perl modules in perl-base.

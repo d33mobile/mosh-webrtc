@@ -82,3 +82,31 @@ jobs:
     - name: tear down
       if: always()
       run: make -C src/tests/webrtc-nat down
+
+  # Debian package (static libdatachannel) built in a clean debian:trixie
+  # container, the same command as in debian/README.source.
+  deb:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: build .deb in debian:trixie
+      run: |
+        mkdir -p out
+        docker run --rm -v "$PWD":/src:ro -v "$PWD/out":/out debian:trixie sh -euc '
+            apt-get update && apt-get install -y --no-install-recommends \
+                build-essential devscripts equivs
+            cp -a /src /build && cd /build
+            mk-build-deps -i -r -t "apt-get -y --no-install-recommends" debian/control
+            dpkg-buildpackage -us -uc -b
+            cp ../mosh-webrtc_* /out/'
+
+    - name: check the package
+      run: |
+        dpkg -I out/mosh-webrtc_*.deb
+        test "$(dpkg -I out/mosh-webrtc_*.deb | grep -c datachannel)" = 0
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: mosh-webrtc-deb
+        path: out/mosh-webrtc_*

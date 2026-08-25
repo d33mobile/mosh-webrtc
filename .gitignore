@@ -43,3 +43,13 @@ src/include/version.h
 # webrtc docker e2e (the global Makefile ignore is for autotools output)
 !src/tests/webrtc-nat/Makefile
 src/tests/__pycache__
+
+# Debian package build (dpkg-buildpackage -b)
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/*.debhelper.log
+/debian/mosh-webrtc/
+/debian/libdatachannel-prefix/

@@ -1,0 +1,15 @@
+Building the mosh-webrtc .deb
+-----------------------------
+
+The package builds libdatachannel (pinned commit in debian/rules, static) at
+build time, so network access is needed. To build in a clean Debian trixie
+container and collect the artefacts in $OUT:
+
+    OUT=/path/to/output; mkdir -p "$OUT"
+    docker run --rm -v "$PWD":/src:ro -v "$OUT":/out debian:trixie sh -euc '
+        apt-get update && apt-get install -y --no-install-recommends \
+            build-essential devscripts equivs
+        cp -a /src /build && cd /build
+        mk-build-deps -i -r -t "apt-get -y --no-install-recommends" debian/control
+        dpkg-buildpackage -us -uc -b
+        cp ../mosh-webrtc_* /out/'
