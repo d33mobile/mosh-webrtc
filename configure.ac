@@ -253,6 +253,29 @@ AC_CHECK_LIB([z], [compress],
    LIBS="$ZLIB_LIBS $LIBS"],
   [AC_MSG_ERROR([Unable to find zlib.])])
 
+AC_ARG_ENABLE([webrtc],
+  [AS_HELP_STRING([--enable-webrtc], [Build WebRTC data channel transport (needs libdatachannel) @<:@no@:>@])],
+  [enable_webrtc="$enableval"],
+  [enable_webrtc="no"])
+AC_ARG_VAR([WEBRTC_LIBS], [linker flags for libdatachannel (default: -ldatachannel -lpthread)])
+AS_IF([test x"$enable_webrtc" != xno],
+  [AS_IF([test -z "$WEBRTC_LIBS"], [WEBRTC_LIBS="-ldatachannel -lpthread"])
+   AC_LANG_PUSH([C++])
+   AC_CHECK_HEADER([rtc/rtc.hpp], [],
+     [AC_MSG_ERROR([--enable-webrtc was given but rtc/rtc.hpp (libdatachannel) was not found.])])
+   save_LIBS="$LIBS"
+   LIBS="$WEBRTC_LIBS $LIBS"
+   AC_MSG_CHECKING([whether libdatachannel links])
+   AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <rtc/rtc.hpp>]],
+       [[rtc::Configuration config; rtc::PeerConnection pc(config); (void)pc.state();]])],
+     [AC_MSG_RESULT([yes])],
+     [AC_MSG_RESULT([no])
+      AC_MSG_ERROR([--enable-webrtc was given but linking with $WEBRTC_LIBS failed.])])
+   LIBS="$save_LIBS"
+   AC_LANG_POP([C++])
+   AC_DEFINE([HAVE_WEBRTC], [1], [Define if the WebRTC transport is built.])])
+AM_CONDITIONAL([ENABLE_WEBRTC], [test x"$enable_webrtc" != xno])
+
 AC_SEARCH_LIBS([socket], [socket network])
 AC_SEARCH_LIBS([inet_addr], [nsl])
 
