@@ -34,6 +34,7 @@
 #include "src/include/version.h"
 
 #include <cstdlib>
+#include <memory>
 
 #include <unistd.h>
 
@@ -41,6 +42,12 @@
 #include "src/util/fatal_assert.h"
 #include "src/util/locale_utils.h"
 #include "stmclient.h"
+
+#ifdef HAVE_WEBRTC
+#include <fstream>
+
+#include "src/network/webrtcbridge.h"
+#endif
 
 /* These need to be included last because of conflicting defines. */
 /*
@@ -90,6 +97,41 @@ static void print_usage( FILE* file, const char* argv0 )
            argv0,
            argv0 );
 }
+
+#ifdef HAVE_WEBRTC
+static const unsigned int WEBRTC_OPEN_TIMEOUT_MS = 30000;
+
+/* Answers the server's offer (from the environment) through the fifo that
+   the mosh wrapper relays back over the ssh session. */
+static std::unique_ptr<Network::WebRTCBridge> webrtc_handshake( const char* offer, const char* answer_fifo )
+{
+  std::unique_ptr<Network::WebRTCBridge> bridge( new Network::WebRTCBridge( false ) );
+  try {
+    bridge->set_remote_description( offer );
+  } catch ( const std::exception& e ) {
+    fprintf( stderr, "mosh-client: bad WebRTC offer: %s\n", e.what() );
+    exit( 1 );
+  }
+  std::string answer = bridge->local_description();
+
+  {
+    std::ofstream out( answer_fifo );
+    out << answer << '\n';
+    if ( !out ) {
+      fprintf( stderr, "mosh-client: cannot write WebRTC answer to %s\n", answer_fifo );
+      exit( 1 );
+    }
+  }
+
+  bridge->start();
+  if ( !bridge->wait_open( WEBRTC_OPEN_TIMEOUT_MS ) ) {
+    fputs( "mosh-client: WebRTC data channel did not open\n", stderr );
+    exit( 1 );
+  }
+  fprintf( stderr, "WebRTC: selected candidate pair %s\n", bridge->selected_candidate_pair().c_str() );
+  return bridge;
+}
+#endif
 
 static void print_colorcount( void )
 {
@@ -146,7 +188,7 @@ int main( int argc, char* argv[] )
     }
   }
 
-  char *ip, *desired_port;
+  const char *ip, *desired_port;
 
   if ( argc - optind != 2 ) {
     print_usage( stderr, argv[0] );
@@ -181,6 +223,34 @@ int main( int argc, char* argv[] )
   std::string key( env_key );
 
   if ( unsetenv( "MOSH_KEY" ) < 0 ) {
+    perror( "unsetenv" );
+    exit( 1 );
+  }
+
+  /* WebRTC mode: the server offer arrives in the environment, the answer
+     leaves through a fifo, and the session then runs over a loopback bridge. */
+  char* webrtc_offer = getenv( "MOSH_WEBRTC_OFFER" );
+  char* webrtc_answer_fifo = getenv( "MOSH_WEBRTC_ANSWER_FIFO" );
+#ifdef HAVE_WEBRTC
+  std::unique_ptr<Network::WebRTCBridge> bridge;
+  std::string bridge_port;
+  if ( webrtc_offer != NULL ) {
+    if ( webrtc_answer_fifo == NULL ) {
+      fputs( "MOSH_WEBRTC_ANSWER_FIFO environment variable not found.\n", stderr );
+      exit( 1 );
+    }
+    bridge = webrtc_handshake( webrtc_offer, webrtc_answer_fifo );
+    bridge_port = bridge->port();
+    ip = "127.0.0.1";
+    desired_port = bridge_port.c_str();
+  }
+#else
+  if ( webrtc_offer != NULL || webrtc_answer_fifo != NULL ) {
+    fputs( "mosh-client: built without WebRTC support (configure --enable-webrtc).\n", stderr );
+    exit( 1 );
+  }
+#endif
+  if ( unsetenv( "MOSH_WEBRTC_OFFER" ) < 0 || unsetenv( "MOSH_WEBRTC_ANSWER_FIFO" ) < 0 ) {
     perror( "unsetenv" );
     exit( 1 );
   }
