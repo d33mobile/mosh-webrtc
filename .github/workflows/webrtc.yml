@@ -1,0 +1,84 @@
+name: webrtc
+
+on: [push, pull_request]
+
+env:
+  LIBDATACHANNEL_COMMIT: 51085b8de4e6185dc019e3705c88b87933d7c3f6
+  LIBDATACHANNEL_PREFIX: /home/runner/libdatachannel
+
+jobs:
+  # Builds with --enable-webrtc (make check runs webrtc-local.test through the
+  # bridge) and without it (the default binaries must not link libdatachannel).
+  build-webrtc:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: install build dependencies
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev libncurses-dev libssl-dev libutempter-dev autoconf automake pkg-config cmake
+
+    - name: cache libdatachannel
+      id: cache-libdatachannel
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.LIBDATACHANNEL_PREFIX }}
+        key: libdatachannel-${{ runner.os }}-${{ env.LIBDATACHANNEL_COMMIT }}-${{ hashFiles('src/tests/webrtc-nat/build-libdatachannel.sh') }}
+
+    - name: build libdatachannel
+      if: steps.cache-libdatachannel.outputs.cache-hit != 'true'
+      run: src/tests/webrtc-nat/build-libdatachannel.sh --commit="$LIBDATACHANNEL_COMMIT" --prefix="$LIBDATACHANNEL_PREFIX"
+
+    - name: generate build scripts
+      run: ./autogen.sh
+
+    - name: configure --enable-webrtc
+      run: ./configure --enable-webrtc --enable-compile-warnings=maximum CPPFLAGS="-I$LIBDATACHANNEL_PREFIX/include" LDFLAGS="-L$LIBDATACHANNEL_PREFIX/lib -Wl,-rpath,$LIBDATACHANNEL_PREFIX/lib"
+
+    - name: build (webrtc)
+      run: make -j"$(nproc)"
+
+    - name: test (webrtc, includes webrtc-local.test)
+      run: make check
+
+    - name: show test logs on failure
+      if: failure()
+      run: cat src/tests/test-suite.log
+
+    - name: configure (default)
+      run: make distclean && ./configure --enable-compile-warnings=maximum
+
+    - name: build (default)
+      run: make -j"$(nproc)"
+
+    - name: default binaries must not link libdatachannel
+      run: test "$(ldd src/frontend/mosh-server src/frontend/mosh-client | grep -c datachannel)" = 0
+
+  # Full NAT-traversal e2e with docker compose (two NATs, STUN, real ssh).
+  # The peer image is built here with a GHA registry cache because its
+  # libdatachannel stage is the slow part; `make run` reuses the loaded image.
+  e2e-nat:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: docker/setup-buildx-action@v3
+
+    - name: build e2e peer image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: src/tests/webrtc-nat/Dockerfile
+        tags: mosh-webrtc-e2e
+        load: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: build nat image
+      run: docker compose -f src/tests/webrtc-nat/docker-compose.yml build nat_client nat_server
+
+    - name: run e2e
+      run: make -C src/tests/webrtc-nat run
+
+    - name: tear down
+      if: always()
+      run: make -C src/tests/webrtc-nat down
