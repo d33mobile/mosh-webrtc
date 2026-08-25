@@ -48,6 +48,7 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <netdb.h>
+#include <poll.h>
 #include <pwd.h>
 #include <strings.h>
 #include <sys/ioctl.h>
@@ -404,6 +405,9 @@ int main( int argc, char* argv[] )
 
 #ifdef HAVE_WEBRTC
 static const unsigned int WEBRTC_OPEN_TIMEOUT_MS = 30000;
+/* The client answers only after its own ICE gathering (about 20 s with an
+   unreachable STUN server). */
+static const unsigned int WEBRTC_ANSWER_TIMEOUT_MS = 60000;
 
 /* Offer/answer exchange over stdout/stdin: the answer is one base64 line. */
 static std::unique_ptr<Network::WebRTCBridge> webrtc_handshake( const ServerConnection& network )
@@ -430,10 +434,25 @@ static std::unique_ptr<Network::WebRTCBridge> webrtc_handshake( const ServerConn
     tcsetattr( STDIN_FILENO, TCSANOW, &tio );
   }
 
+  /* Unbuffered reads, so that poll() sees exactly what is still unread. */
   std::string answer;
-  int c;
-  while ( ( c = getchar() ) != EOF && c != '\n' ) {
-    answer.push_back( static_cast<char>( c ) );
+  const uint64_t deadline = timestamp() + WEBRTC_ANSWER_TIMEOUT_MS;
+  for ( ;; ) {
+    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+    const uint64_t now = timestamp();
+    if ( now >= deadline || poll( &pfd, 1, static_cast<int>( deadline - now ) ) == 0 ) {
+      fputs( "mosh-server: timed out waiting for the WebRTC answer\n", stderr );
+      exit( 1 );
+    }
+    char c;
+    const ssize_t n = read( STDIN_FILENO, &c, 1 );
+    if ( n < 0 && errno == EINTR ) {
+      continue;
+    }
+    if ( n <= 0 || c == '\n' ) {
+      break;
+    }
+    answer.push_back( c );
   }
   while ( !answer.empty() && ( answer.back() == '\r' || answer.back() == ' ' ) ) {
     answer.pop_back();
@@ -731,6 +750,18 @@ static int run_server( const char* desired_ip,
     }
 
     Crypto::reenable_dumping_core();
+
+    if ( webrtc ) {
+      /* libdatachannel's sockets and pipes are not close-on-exec. */
+#ifdef HAVE_CLOSE_RANGE
+      close_range( 3, ~0U, 0 );
+#else
+      const long open_max = sysconf( _SC_OPEN_MAX );
+      for ( int fd = 3; fd < open_max; fd++ ) {
+        close( fd );
+      }
+#endif
+    }
 
     if ( execvp( command_path.c_str(), command_argv ) < 0 ) {
       warn( "execvp: %s", command_path.c_str() );

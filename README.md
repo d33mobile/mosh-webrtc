@@ -130,8 +130,8 @@ WebRTC mode
 
   Signaling runs over the ssh session: `mosh-server` gathers its ICE
   candidates, prints `MOSH CONNECT webrtc KEY OFFER`, and stays attached to
-  ssh until `mosh` writes the client's answer to its stdin. The ssh session
-  is then closed as in normal mode.
+  ssh until `mosh` writes the client's answer to its stdin (or gives up
+  after 60 seconds). The ssh session is then closed as in normal mode.
 
   Limitations:
 

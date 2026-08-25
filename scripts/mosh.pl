@@ -39,7 +39,8 @@ use IO::Socket;
 use Text::ParseWords;
 use Socket qw(IPPROTO_TCP);
 use Errno qw(EINTR);
-use POSIX qw(_exit mkfifo);
+use POSIX qw(_exit mkfifo WNOHANG);
+use Fcntl qw(O_RDONLY O_NONBLOCK);
 use File::Temp qw(tempdir);
 
 BEGIN {
@@ -526,12 +527,24 @@ sub webrtc_start_client {
     die "Cannot exec $client: $!\n";
   }
 
-  # The client opens the fifo only after its ICE gathering finished; the
-  # server waits on stdin meanwhile, so blocking here is fine.
-  open( my $answer_fh, '<', $fifo ) or die "$0: open $fifo: $!\n";
-  my $answer = <$answer_fh>;
+  # The client opens the fifo only after its ICE gathering finished; a
+  # blocking open would never return if it dies first, so poll instead and
+  # keep an eye on the client.
+  sysopen( my $answer_fh, $fifo, O_RDONLY | O_NONBLOCK ) or die "$0: open $fifo: $!\n";
+  my $answer = '';
+  until ( $answer =~ m{\n} ) {
+    my $n = sysread( $answer_fh, $answer, 65536, length $answer );
+    next if $n;
+    if ( waitpid( $client_pid, WNOHANG ) == $client_pid ) {
+      # Over "ssh -tt" a closed stdin does not end the session, so make
+      # ssh hang up instead of waiting for the server's answer timeout.
+      close $ssh_stdin_w;
+      kill 'TERM', $pid;
+      die "$0: mosh-client exited with status " . ( $? >> 8 ) . " before answering.\n";
+    }
+    select( undef, undef, undef, 0.2 );
+  }
   close $answer_fh;
-  die "$0: mosh-client did not produce a WebRTC answer.\n" unless defined $answer;
   chomp $answer;
   print $ssh_stdin_w "$answer\n";
   close $ssh_stdin_w or die "$0: writing WebRTC answer to ssh: $!\n";

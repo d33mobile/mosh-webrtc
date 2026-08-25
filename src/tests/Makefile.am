@@ -4,7 +4,7 @@ EXTRA_DIST = \
 	e2e-test-subrs \
 	mosh-client mosh-server \
 	local.test \
-	webrtc-local.test \
+	webrtc-local.test webrtc-no-answer.test webrtc-ssh-failure.test \
 	webrtc-local-smoke.py webrtc-ssh-smoke.py webrtc-nat-e2e.py \
 	webrtc-nat/Dockerfile webrtc-nat/Dockerfile.nat webrtc-nat/docker-compose.yml \
 	webrtc-nat/entrypoint.sh webrtc-nat/nat.sh webrtc-nat/build-libdatachannel.sh \
@@ -45,7 +45,7 @@ displaytests = \
 	window-resize.test
 
 check_PROGRAMS = ocb-aes encrypt-decrypt base64 nonce-incr inpty is-utf8-locale
-TESTS = ocb-aes encrypt-decrypt base64 nonce-incr local.test webrtc-local.test $(displaytests)
+TESTS = ocb-aes encrypt-decrypt base64 nonce-incr local.test webrtc-local.test webrtc-no-answer.test webrtc-ssh-failure.test $(displaytests)
 XFAIL_TESTS = \
 	e2e-failure.test \
 	emulation-attributes-256color8.test

@@ -333,6 +333,7 @@ AC_CHECK_FUNCS(m4_normalize([
   gettimeofday
   posix_memalign
   cfmakeraw
+  close_range
   pselect
   pledge
   ]))

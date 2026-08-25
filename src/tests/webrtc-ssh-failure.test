@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# mosh --webrtc over ssh to localhost must fail promptly when mosh-client
+# dies before answering. Skipped without --enable-webrtc or without
+# passwordless ssh to localhost.
+
+. "$(dirname "$0")/e2e-test-subrs"
+if ! set_locale; then
+    echo "$0: no usable locale" >&2
+    exit 99
+fi
+if ! grep -q '^#define HAVE_WEBRTC 1' ../include/config.h; then
+    echo "$0: built without --enable-webrtc, skipping" >&2
+    exit 77
+fi
+if ! ssh -o BatchMode=yes -o StrictHostKeyChecking=no localhost true 2>/dev/null; then
+    echo "$0: no passwordless ssh to localhost, skipping" >&2
+    exit 77
+fi
+
+set -eu
+exec python3 "$srcdir/webrtc-ssh-smoke.py" --webrtc --fake-client-failure \
+    --mosh="$srcdir/../../scripts/mosh.pl" \
+    --server="$(cd ../frontend && pwd)/mosh-server" --client="$(cd ../frontend && pwd)/mosh-client"

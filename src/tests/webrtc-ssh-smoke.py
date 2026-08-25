@@ -12,8 +12,10 @@ import importlib.util
 import os
 import pty
 import re
+import stat
 import struct
 import sys
+import tempfile
 import termios
 import time
 
@@ -35,6 +37,46 @@ log, read_until = local_smoke.log, local_smoke.read_until
 # 20 s each with an unreachable STUN server).
 PROMPT_TIMEOUT_S = 120
 
+# With a dead client mosh.pl must give up on its own, well before the
+# server-side answer timeout would end the session for it.
+FAILURE_TIMEOUT_S = 15
+
+FAKE_CLIENT = """#!/bin/sh
+# Stand-in for mosh-client that dies before writing the WebRTC answer.
+[ "$1" = -c ] && { echo 8; exit 0; }
+echo "fake mosh-client: giving up" >&2
+exit 1
+"""
+
+
+def fake_client_failure(args, argv, env):
+    """mosh.pl must exit non-zero soon after its client dies without an answer."""
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = os.path.join(tmp, "mosh-client")
+        with open(fake, "w") as f:
+            f.write(FAKE_CLIENT)
+        os.chmod(fake, stat.S_IRWXU)
+        argv = [a if not a.startswith("--client=") else f"--client={fake}" for a in argv]
+        log(f"starting {' '.join(argv)}")
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execvpe(argv[0], argv, env)
+        _, buf = read_until(fd, re.compile(rb"fake mosh-client: giving up"), args.prompt_timeout)
+        log("fake client died, waiting for mosh.pl to notice")
+        try:
+            read_until(fd, re.compile(rb"(?!)"), FAILURE_TIMEOUT_S, buf)
+        except local_smoke.ReadError as e:
+            if not e.args[0].startswith("EOF"):
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                sys.exit("FAIL: mosh.pl still running after the client exited without an answer")
+        _, status = os.waitpid(pid, 0)
+        rc = os.waitstatus_to_exitcode(status)
+        log(f"mosh.pl exited with {rc}")
+        if rc == 0:
+            sys.exit("FAIL: mosh.pl exited 0 although the client exited without an answer")
+        log("PASS")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -45,6 +87,11 @@ def main():
     parser.add_argument("--ssh", default="ssh -o BatchMode=yes -o StrictHostKeyChecking=no")
     parser.add_argument("--stun", default="127.0.0.1:1", help="STUN server; the default fails fast")
     parser.add_argument("--webrtc", action="store_true")
+    parser.add_argument(
+        "--fake-client-failure",
+        action="store_true",
+        help="run with a client that exits before answering; expect mosh.pl to fail promptly",
+    )
     parser.add_argument("--dump", help="write the raw pty output up to the marker to this file")
     parser.add_argument("--prompt-timeout", type=float, default=PROMPT_TIMEOUT_S)
     args = parser.parse_args()
@@ -55,6 +102,10 @@ def main():
         argv.append("--webrtc")
     argv += [args.host, "--", "/bin/sh"]
 
+    if args.fake_client_failure:
+        fake_client_failure(args, argv, env)
+        return
+
     log(f"starting {' '.join(argv)}")
     pid, fd = pty.fork()
     if pid == 0:
@@ -63,26 +114,28 @@ def main():
 
     marker = f"MARKER-{os.getpid()}".encode()
     output_re = re.compile(rb"(?:^|[\r\n])" + re.escape(marker) + rb"[\r\n]")
-    # /bin/sh prints "$ " once mosh-client has drawn the remote screen.
-    _, buf = read_until(fd, re.compile(rb"\$ "), args.prompt_timeout)
-    log("got a prompt")
-    time.sleep(1)
-    os.write(fd, b"echo " + marker[:-4] + b"'" + marker[-4:] + b"'\n")
-    _, buf = read_until(fd, output_re, MARKER_TIMEOUT_S, buf)
-    log("marker echoed back")
-    if args.dump:
-        with open(args.dump, "wb") as f:
-            f.write(buf)
+    buf = b""
+    try:
+        # /bin/sh prints "$ " once mosh-client has drawn the remote screen.
+        _, buf = read_until(fd, re.compile(rb"\$ "), args.prompt_timeout)
+        log("got a prompt")
+        time.sleep(1)
+        os.write(fd, b"echo " + marker[:-4] + b"'" + marker[-4:] + b"'\n")
+        _, buf = read_until(fd, output_re, MARKER_TIMEOUT_S, buf)
+        log("marker echoed back")
+    except local_smoke.ReadError as e:
+        buf = e.buf
+        raise
+    finally:
+        if args.dump:
+            with open(args.dump, "wb") as f:
+                f.write(buf)
 
     os.write(fd, b"exit\n")
-    try:
-        read_until(fd, re.compile(rb"mosh is exiting"), EXIT_TIMEOUT_S, buf)
-    except EOFError:
-        pass
     # Drain until mosh.pl closes the pty.
     try:
-        read_until(fd, re.compile(rb"(?!)"), EXIT_TIMEOUT_S)
-    except (EOFError, TimeoutError):
+        read_until(fd, re.compile(rb"(?!)"), EXIT_TIMEOUT_S, buf)
+    except local_smoke.ReadError:
         pass
     _, status = os.waitpid(pid, 0)
     rc = os.waitstatus_to_exitcode(status)

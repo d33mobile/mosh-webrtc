@@ -27,9 +27,25 @@ ANSWER_TIMEOUT_S = 90
 MARKER_TIMEOUT_S = 60
 EXIT_TIMEOUT_S = 30
 
+# Longer than the server's own answer timeout, so a server that never gives
+# up is reported as such and not as a slow one.
+NO_ANSWER_TIMEOUT_S = 90
+
+# Fds the spawned /bin/sh may legitimately hold: stdio plus the copy of its
+# controlling tty that dash and bash keep on fd 10.
+SHELL_FDS = {"0", "1", "2", "10"}
+
 
 def log(msg):
     print(f"[smoke] {msg}", file=sys.stderr, flush=True)
+
+
+class ReadError(Exception):
+    """Timeout or EOF in read_until; .buf holds what was read so far."""
+
+    def __init__(self, msg, buf):
+        super().__init__(f"{msg}; got {buf[-500:]!r}")
+        self.buf = buf
 
 
 def read_until(fd, pattern, timeout_s, buf=b""):
@@ -41,7 +57,7 @@ def read_until(fd, pattern, timeout_s, buf=b""):
             return match, buf
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError(f"waited {timeout_s}s for {pattern.pattern!r}; got {buf[-500:]!r}")
+            raise ReadError(f"waited {timeout_s}s for {pattern.pattern!r}", buf)
         ready, _, _ = select.select([fd], [], [], min(remaining, 1.0))
         if not ready:
             continue
@@ -50,7 +66,7 @@ def read_until(fd, pattern, timeout_s, buf=b""):
         except OSError:
             chunk = b""
         if not chunk:
-            raise EOFError(f"EOF while waiting for {pattern.pattern!r}; got {buf[-500:]!r}")
+            raise ReadError(f"EOF while waiting for {pattern.pattern!r}", buf)
         buf += chunk
 
 
@@ -59,6 +75,9 @@ def main():
     parser.add_argument("--server", default="./src/frontend/mosh-server")
     parser.add_argument("--client", default="./src/frontend/mosh-client")
     parser.add_argument("--stun", default="127.0.0.1:1", help="STUN server; the default fails fast")
+    parser.add_argument(
+        "--no-answer", action="store_true", help="never send the answer; expect the server to give up"
+    )
     args = parser.parse_args()
 
     env = dict(os.environ, MOSH_STUN_SERVER=args.stun, TERM="xterm", LANG="C.UTF-8")
@@ -74,6 +93,19 @@ def main():
     match, _ = read_until(server.stdout.fileno(), CONNECT_RE, OFFER_TIMEOUT_S)
     key, offer = match.group(1).decode(), match.group(2).decode()
     log(f"got offer ({len(offer)} base64 chars)")
+
+    if args.no_answer:
+        log("not answering, waiting for the server to time out")
+        try:
+            rc = server.wait(timeout=NO_ANSWER_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            sys.exit(f"FAIL: mosh-server still waiting for the answer after {NO_ANSWER_TIMEOUT_S}s")
+        log(f"mosh-server exited with {rc}")
+        if rc != 1:
+            sys.exit(f"FAIL: expected exit status 1, got {rc}")
+        log("PASS")
+        return
 
     with tempfile.TemporaryDirectory() as tmp:
         fifo = os.path.join(tmp, "answer")
@@ -98,19 +130,31 @@ def main():
         server.stdin.close()
 
         marker = f"MARKER-{os.getpid()}".encode()
-        # The shell must echo the marker as command output, not merely as
-        # the typed line, so look for it at the start of a line.
+        # The typed line is echoed too, so look for the marker at the start
+        # of a line to match only the command output.
         output_re = re.compile(rb"(?:^|[\r\n])" + re.escape(marker) + rb"[\r\n]")
         time.sleep(1)
         os.write(client_fd, b"echo " + marker[:-4] + b"'" + marker[-4:] + b"'\n")
         _, buf = read_until(client_fd, output_re, MARKER_TIMEOUT_S)
         log("marker echoed back through the bridge")
 
+        if os.path.isdir("/proc/self/fd"):
+            # WebRTC fds must not leak into the shell (the quote splits the
+            # marker so the typed line does not match).
+            fds_re = re.compile(rb"FDS-BEGIN[\r\n]+(.*?)[\r\n]+FDS-END[\r\n]", re.S)
+            os.write(client_fd, b"echo FDS-'BEGIN'; ls /proc/$$/fd; echo FDS-'END'\n")
+            match, buf = read_until(client_fd, fds_re, MARKER_TIMEOUT_S, buf)
+            # mosh redraws the screen with cursor-movement sequences.
+            fds = set(re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b" ", match.group(1)).decode().split())
+            log(f"shell fds: {sorted(fds, key=int)}")
+            if not fds <= SHELL_FDS:
+                sys.exit(f"FAIL: fds leaked into the shell: {sorted(fds - SHELL_FDS, key=int)}")
+
         os.write(client_fd, b"exit\n")
         exit_re = re.compile(rb"mosh is exiting")
         try:
             read_until(client_fd, exit_re, EXIT_TIMEOUT_S, buf)
-        except EOFError:
+        except ReadError:
             pass
         _, status = os.waitpid(client_pid, 0)
         client_rc = os.waitstatus_to_exitcode(status)

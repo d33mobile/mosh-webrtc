@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# mosh-server --webrtc must give up on its own when no answer arrives.
+# Skipped when the binaries were built without --enable-webrtc.
+
+. "$(dirname "$0")/e2e-test-subrs"
+if ! set_locale; then
+    echo "$0: no usable locale" >&2
+    exit 99
+fi
+if ! grep -q '^#define HAVE_WEBRTC 1' ../include/config.h; then
+    echo "$0: built without --enable-webrtc, skipping" >&2
+    exit 77
+fi
+
+set -eu
+exec python3 "$srcdir/webrtc-local-smoke.py" \
+    --server=../frontend/mosh-server --no-answer
