@@ -104,7 +104,7 @@ jobs:
     - name: check the package
       run: |
         dpkg -I out/mosh-webrtc_*.deb
-        test "$(dpkg -I out/mosh-webrtc_*.deb | grep -c datachannel)" = 0
+        test "$(dpkg -I out/mosh-webrtc_*.deb | grep "^ Depends:" | grep -c datachannel)" = 0
 
     - uses: actions/upload-artifact@v4
       with:
