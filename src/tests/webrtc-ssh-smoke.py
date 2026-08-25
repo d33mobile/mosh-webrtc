@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local smoke test of scripts/mosh.pl over ssh to localhost (no docker).
+"""Smoke test of scripts/mosh.pl over ssh to localhost (no docker).
 
 Runs mosh.pl under a pty, types a marker into the resulting shell and
 expects it to be echoed back, then exits and checks the exit status.
@@ -8,6 +8,7 @@ With --webrtc the session goes through the WebRTC bridge.
 
 import argparse
 import fcntl
+import importlib.util
 import os
 import pty
 import re
@@ -16,7 +17,19 @@ import sys
 import termios
 import time
 
-from local_smoke import EXIT_TIMEOUT_S, MARKER_TIMEOUT_S, log, read_until
+
+def load_sibling(name):
+    """Imports a script next to this one; the hyphenated file names are not module names."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_").removesuffix(".py"), path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+local_smoke = load_sibling("webrtc-local-smoke.py")
+EXIT_TIMEOUT_S, MARKER_TIMEOUT_S = local_smoke.EXIT_TIMEOUT_S, local_smoke.MARKER_TIMEOUT_S
+log, read_until = local_smoke.log, local_smoke.read_until
 
 # The prompt appears only after both sides finished ICE gathering (about
 # 20 s each with an unreachable STUN server).
@@ -33,6 +46,7 @@ def main():
     parser.add_argument("--stun", default="127.0.0.1:1", help="STUN server; the default fails fast")
     parser.add_argument("--webrtc", action="store_true")
     parser.add_argument("--dump", help="write the raw pty output up to the marker to this file")
+    parser.add_argument("--prompt-timeout", type=float, default=PROMPT_TIMEOUT_S)
     args = parser.parse_args()
 
     env = dict(os.environ, MOSH_STUN_SERVER=args.stun, TERM="xterm", LANG="C.UTF-8")
@@ -50,7 +64,7 @@ def main():
     marker = f"MARKER-{os.getpid()}".encode()
     output_re = re.compile(rb"(?:^|[\r\n])" + re.escape(marker) + rb"[\r\n]")
     # /bin/sh prints "$ " once mosh-client has drawn the remote screen.
-    _, buf = read_until(fd, re.compile(rb"\$ "), PROMPT_TIMEOUT_S)
+    _, buf = read_until(fd, re.compile(rb"\$ "), args.prompt_timeout)
     log("got a prompt")
     time.sleep(1)
     os.write(fd, b"echo " + marker[:-4] + b"'" + marker[-4:] + b"'\n")

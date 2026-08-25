@@ -1,0 +1,5 @@
+# NAT box for the e2e topology: alpine plus iptables; the rules live in nat.sh.
+FROM alpine:3.21
+RUN apk add --no-cache iptables
+COPY nat.sh /nat.sh
+CMD ["/nat.sh"]

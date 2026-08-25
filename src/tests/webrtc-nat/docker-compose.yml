@@ -1,0 +1,109 @@
+# Two NATted LANs joined by an isolated "wan" that only hosts a STUN server.
+#
+#   client 10.1.0.10 --> nat_client 10.1.0.2 | 10.99.0.2 --> wan <-- 10.99.0.3 | 10.2.0.2 nat_server <-- server 10.2.0.10
+#                                                        stun 10.99.0.10
+#
+# The client reaches sshd through a port forward on nat_server's wan address;
+# plain mosh UDP has no such forward, so only WebRTC (STUN + hole punching)
+# can carry the session.
+#
+# The networks are not `internal: true` on purpose: for internal networks
+# Docker adds host rules dropping bridged frames whose destination is outside
+# the subnet (br_netfilter), which blocks routing through the NAT containers.
+# Host masquerading is disabled instead and every container drops the default
+# route Docker gives it (nat.sh / entrypoint.sh), so nothing leaves the topology.
+networks:
+  wan:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24
+  lan_client:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 10.1.0.0/24
+  lan_server:
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 10.2.0.0/24
+
+x-nat: &nat
+  build:
+    context: .
+    dockerfile: Dockerfile.nat
+  image: mosh-webrtc-e2e-nat
+  cap_add: [NET_ADMIN]
+  sysctls:
+    net.ipv4.ip_forward: 1
+  healthcheck:
+    test: ["CMD", "test", "-f", "/run/nat-ready"]
+    interval: 1s
+    timeout: 2s
+    retries: 15
+
+x-peer: &peer
+  build:
+    context: ../../..
+    dockerfile: src/tests/webrtc-nat/Dockerfile
+  image: mosh-webrtc-e2e
+  cap_add: [NET_ADMIN]
+
+services:
+  stun:
+    image: coturn/coturn:4.6
+    command: turnserver --stun-only -n --listening-port=3478 --listening-ip=10.99.0.10 --log-file=stdout
+    networks:
+      wan:
+        ipv4_address: 10.99.0.10
+
+  nat_client:
+    <<: *nat
+    environment:
+      LAN_SUBNET: 10.1.0.0/24
+    networks:
+      wan:
+        ipv4_address: 10.99.0.2
+      lan_client:
+        ipv4_address: 10.1.0.2
+
+  nat_server:
+    <<: *nat
+    environment:
+      LAN_SUBNET: 10.2.0.0/24
+      SSH_FORWARD_TO: 10.2.0.10
+    networks:
+      wan:
+        ipv4_address: 10.99.0.3
+      lan_server:
+        ipv4_address: 10.2.0.2
+
+  server:
+    <<: *peer
+    environment:
+      GATEWAY: 10.2.0.2
+    command: ["/usr/sbin/sshd", "-D", "-e"]
+    depends_on:
+      nat_server:
+        condition: service_healthy
+    networks:
+      lan_server:
+        ipv4_address: 10.2.0.10
+
+  client:
+    <<: *peer
+    environment:
+      GATEWAY: 10.1.0.2
+    command: ["python3", "/tests/webrtc-nat-e2e.py"]
+    depends_on:
+      nat_client:
+        condition: service_healthy
+      server:
+        condition: service_started
+    networks:
+      lan_client:
+        ipv4_address: 10.1.0.10

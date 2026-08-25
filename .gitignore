@@ -39,3 +39,7 @@ src/include/stamp-h1
 /VERSION.stamp
 /scripts/mosh
 src/include/version.h
+
+# webrtc docker e2e (the global Makefile ignore is for autotools output)
+!src/tests/webrtc-nat/Makefile
+src/tests/__pycache__

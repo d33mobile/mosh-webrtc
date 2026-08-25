@@ -1,0 +1,15 @@
+.git
+autom4te.cache
+**/.deps
+**/*.o
+**/*.a
+**/*.pb.cc
+**/*.pb.h
+**/Makefile
+**/Makefile.in
+**/__pycache__
+config.log
+config.status
+src/include/config.h
+src/frontend/mosh-server
+src/frontend/mosh-client
