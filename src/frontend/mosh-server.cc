@@ -45,6 +45,7 @@
 
 #include <err.h>
 #include <fcntl.h>
+#include <getopt.h>
 #include <inttypes.h>
 #include <netdb.h>
 #include <pwd.h>
@@ -94,6 +95,9 @@
 #endif
 
 #include "src/network/networktransport-impl.h"
+#ifdef HAVE_WEBRTC
+#include "src/network/webrtcbridge.h"
+#endif
 
 using ServerConnection = Network::Transport<Terminal::Complete, Network::UserStream>;
 
@@ -110,7 +114,8 @@ static int run_server( const char* desired_ip,
                        char* command_argv[],
                        const int colors,
                        unsigned int verbose,
-                       bool with_motd );
+                       bool with_motd,
+                       bool webrtc );
 
 static void print_version( FILE* file )
 {
@@ -125,7 +130,8 @@ static void print_version( FILE* file )
 static void print_usage( FILE* stream, const char* argv0 )
 {
   fprintf( stream,
-           "Usage: %s new [-s] [-v] [-i LOCALADDR] [-p PORT[:PORT2]] [-c COLORS] [-l NAME=VALUE] [-- COMMAND...]\n",
+           "Usage: %s new [-s] [-v] [-i LOCALADDR] [-p PORT[:PORT2]] [-c COLORS] [-l NAME=VALUE] [--webrtc] [-- "
+           "COMMAND...]\n",
            argv0 );
 }
 
@@ -190,6 +196,7 @@ int main( int argc, char* argv[] )
   char** command_argv = NULL;
   int colors = 0;
   unsigned int verbose = 0; /* don't close stdin/stdout/stderr */
+  bool webrtc = false;
   /* Will cause mosh-server not to correctly detach on old versions of sshd. */
   std::list<std::string> locale_vars;
 
@@ -216,7 +223,8 @@ int main( int argc, char* argv[] )
   if ( ( argc >= 2 ) && ( strcmp( argv[1], "new" ) == 0 ) ) {
     /* new option syntax */
     int opt;
-    while ( ( opt = getopt( argc - 1, argv + 1, "@:i:p:c:svl:" ) ) != -1 ) {
+    static const struct option long_options[] = { { "webrtc", no_argument, NULL, 'w' }, { NULL, 0, NULL, 0 } };
+    while ( ( opt = getopt_long( argc - 1, argv + 1, "@:i:p:c:svl:", long_options, NULL ) ) != -1 ) {
       switch ( opt ) {
           /*
            * This undocumented option does nothing but eat its argument.
@@ -257,11 +265,23 @@ int main( int argc, char* argv[] )
         case 'l':
           locale_vars.push_back( std::string( optarg ) );
           break;
+        case 'w':
+#ifdef HAVE_WEBRTC
+          webrtc = true;
+#else
+          fprintf( stderr, "%s: --webrtc requires a build with --enable-webrtc\n", argv[0] );
+          exit( 1 );
+#endif
+          break;
         default:
           /* don't die on unknown options */
           print_usage( stderr, argv[0] );
           break;
       }
+    }
+    if ( webrtc ) {
+      /* The bridge relays between the loopback socket and the data channel. */
+      desired_ip = "127.0.0.1";
     }
   } else if ( argc == 1 ) {
     /* legacy argument parsing for older client wrapper script */
@@ -372,7 +392,7 @@ int main( int argc, char* argv[] )
   }
 
   try {
-    return run_server( desired_ip, desired_port, command_path, command_argv, colors, verbose, with_motd );
+    return run_server( desired_ip, desired_port, command_path, command_argv, colors, verbose, with_motd, webrtc );
   } catch ( const Network::NetworkException& e ) {
     fprintf( stderr, "Network exception: %s\n", e.what() );
     return 1;
@@ -382,13 +402,60 @@ int main( int argc, char* argv[] )
   }
 }
 
+#ifdef HAVE_WEBRTC
+static const unsigned int WEBRTC_OPEN_TIMEOUT_MS = 30000;
+
+/* Offer/answer exchange over stdout/stdin: the answer is one base64 line. */
+static std::unique_ptr<Network::WebRTCBridge> webrtc_handshake( const ServerConnection& network )
+{
+  std::unique_ptr<Network::WebRTCBridge> bridge( new Network::WebRTCBridge( true ) );
+
+  struct sockaddr_in mosh_socket;
+  memset( &mosh_socket, 0, sizeof( mosh_socket ) );
+  mosh_socket.sin_family = AF_INET;
+  mosh_socket.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
+  mosh_socket.sin_port = htons( static_cast<uint16_t>( myatoi( network.port().c_str() ) ) );
+  bridge->set_peer( reinterpret_cast<const struct sockaddr*>( &mosh_socket ), sizeof( mosh_socket ) );
+
+  printf( "MOSH CONNECT webrtc %s %s\n", network.get_key().c_str(), bridge->local_description().c_str() );
+  fflush( stdout );
+
+  std::string answer;
+  int c;
+  while ( ( c = getchar() ) != EOF && c != '\n' ) {
+    answer.push_back( static_cast<char>( c ) );
+  }
+  while ( !answer.empty() && ( answer.back() == '\r' || answer.back() == ' ' ) ) {
+    answer.pop_back();
+  }
+  if ( answer.empty() ) {
+    fputs( "mosh-server: no WebRTC answer received on stdin\n", stderr );
+    exit( 1 );
+  }
+  try {
+    bridge->set_remote_description( answer );
+  } catch ( const std::exception& e ) {
+    fprintf( stderr, "mosh-server: bad WebRTC answer: %s\n", e.what() );
+    exit( 1 );
+  }
+  bridge->start();
+  if ( !bridge->wait_open( WEBRTC_OPEN_TIMEOUT_MS ) ) {
+    fputs( "mosh-server: WebRTC data channel did not open\n", stderr );
+    exit( 1 );
+  }
+  fprintf( stderr, "WebRTC: selected candidate pair %s\n", bridge->selected_candidate_pair().c_str() );
+  return bridge;
+}
+#endif
+
 static int run_server( const char* desired_ip,
                        const char* desired_port,
                        const std::string& command_path,
                        char* command_argv[],
                        const int colors,
                        unsigned int verbose,
-                       bool with_motd )
+                       bool with_motd,
+                       bool webrtc )
 {
   /* get network idle timeout */
   long network_timeout = 0;
@@ -447,7 +514,9 @@ static int run_server( const char* desired_ip,
   if ( isatty( STDIN_FILENO ) ) {
     puts( "\r\n" );
   }
-  printf( "MOSH CONNECT %s %s\n", network->port().c_str(), network->get_key().c_str() );
+  if ( !webrtc ) {
+    printf( "MOSH CONNECT %s %s\n", network->port().c_str(), network->get_key().c_str() );
+  }
 
   /* don't let signals kill us */
   struct sigaction sa;
@@ -489,6 +558,18 @@ static int run_server( const char* desired_ip,
   }
 
   int master;
+
+#ifdef HAVE_WEBRTC
+  /* The bridge spawns threads, so it must be created after the detach fork.
+     The signaling exchange happens here, while stdin/stdout still belong to
+     the ssh session. */
+  std::unique_ptr<Network::WebRTCBridge> bridge;
+  if ( webrtc ) {
+    bridge = webrtc_handshake( *network );
+  }
+#else
+  fatal_assert( !webrtc );
+#endif
 
   /* close file descriptors */
   if ( verbose == 0 ) {

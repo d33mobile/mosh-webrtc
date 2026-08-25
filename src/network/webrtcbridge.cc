@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <stdexcept>
 #include <vector>
 
@@ -127,6 +128,8 @@ WebRTCBridge::WebRTCBridge( bool s_offerer )
   if ( sock < 0 ) {
     throw std::runtime_error( std::string( "socket: " ) + strerror( errno ) );
   }
+  /* The server forks the user's shell; do not leak the socket into it. */
+  fcntl( sock, F_SETFD, FD_CLOEXEC );
   struct sockaddr_in local;
   memset( &local, 0, sizeof local );
   local.sin_family = AF_INET;
