@@ -599,8 +599,6 @@ static int run_server( const char* desired_ip,
     fatal_assert( write( handshake_pipe[1], "", 1 ) == 1 );
     close( handshake_pipe[1] );
   }
-#else
-  fatal_assert( !webrtc );
 #endif
 
   /* close file descriptors */

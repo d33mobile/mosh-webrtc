@@ -108,6 +108,51 @@ How it works
   61000, but the user can select a particular port with the -p option.
   Please note that the -p option has no effect on the port used by SSH.
 
+WebRTC mode
+-----------
+
+  Mosh can tunnel its UDP datagrams through a WebRTC data channel. ICE
+  with a STUN server takes care of NAT traversal, so both the client and
+  the server can sit behind NAT without any port forwarding. Mosh keeps
+  its own AES-OCB encryption on top of the DTLS-protected channel.
+
+  Build: install [libdatachannel](https://github.com/paullouisageneau/libdatachannel)
+  (`src/tests/webrtc-nat/build-libdatachannel.sh --prefix=DIR` builds the
+  version used by CI) and configure with `--enable-webrtc`. Both the client
+  and the server must be built this way.
+
+    $ mosh --webrtc [user@]host
+
+  The STUN server comes from `MOSH_STUN_SERVER` (`host:port`, default
+  `stun.l.google.com:19302`). Both sides read it. ssh usually does not
+  forward the variable, so set it for the server with
+  `--server='MOSH_STUN_SERVER=host:port mosh-server'`.
+
+  Signaling runs over the ssh session: `mosh-server` gathers its ICE
+  candidates, prints `MOSH CONNECT webrtc KEY OFFER`, and stays attached to
+  ssh until `mosh` writes the client's answer to its stdin. The ssh session
+  is then closed as in normal mode.
+
+  Limitations:
+
+   * No trickle ICE: each side waits for candidate gathering before it
+     sends its description. Connection setup takes about 20 seconds when
+     the STUN server is unreachable.
+
+   * No TURN relay: if both sides are behind symmetric NAT the connection
+     fails.
+
+   * Roaming works only within the ICE session. Once the data channel
+     drops, run `mosh --webrtc` again.
+
+   * Double encryption (mosh AES-OCB inside DTLS) costs some CPU.
+
+  Tests: `make check` runs `webrtc-local.test` (a loopback session through
+  the bridge, skipped when built without `--enable-webrtc`);
+  `make -C src/tests/webrtc-nat test` runs a docker compose e2e test with
+  both peers behind NAT and a private STUN server. The GitHub Actions
+  workflow `.github/workflows/webrtc.yml` runs both.
+
 Advice to distributors
 ----------------------
 

@@ -153,11 +153,9 @@ WebRTCBridge::WebRTCBridge( bool s_offerer )
   pc->onLocalCandidate( [this]( rtc::Candidate candidate ) {
     fprintf( stderr, "WebRTCBridge: local candidate %s\n", std::string( candidate ).c_str() );
   } );
-  pc->onStateChange( [this]( rtc::PeerConnection::State state ) {
-    if ( state == rtc::PeerConnection::State::Failed || state == rtc::PeerConnection::State::Closed ) {
-      fprintf( stderr,
-               "WebRTCBridge: peer connection %s\n",
-               state == rtc::PeerConnection::State::Failed ? "failed" : "closed" );
+  pc->onStateChange( []( rtc::PeerConnection::State state ) {
+    if ( state == rtc::PeerConnection::State::Failed ) {
+      fputs( "WebRTCBridge: peer connection failed\n", stderr );
     }
   } );
 

@@ -34,7 +34,6 @@
 #include "src/include/version.h"
 
 #include <cstdlib>
-#include <memory>
 
 #include <unistd.h>
 
@@ -45,6 +44,7 @@
 
 #ifdef HAVE_WEBRTC
 #include <fstream>
+#include <memory>
 
 #include "src/network/webrtcbridge.h"
 #endif
