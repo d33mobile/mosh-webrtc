@@ -39,7 +39,8 @@ use IO::Socket;
 use Text::ParseWords;
 use Socket qw(IPPROTO_TCP);
 use Errno qw(EINTR);
-use POSIX qw(_exit);
+use POSIX qw(_exit mkfifo);
+use File::Temp qw(tempdir);
 
 BEGIN {
   my @gai_reqs = qw( getaddrinfo getnameinfo AI_CANONNAME AI_NUMERICHOST NI_NUMERICHOST );
@@ -83,6 +84,8 @@ my $localhost = undef;
 
 my $ssh_pty = 1;
 
+my $webrtc = undef;
+
 my $help = undef;
 my $version = undef;
 
@@ -123,6 +126,10 @@ qq{Usage: $0 [options] [--] [user@]host [command...]
         --no-init            do not send terminal initialization string
 
         --local              run mosh-server locally without using ssh
+
+        --webrtc             connect through a WebRTC data channel
+                                (NAT traversal; server must be built
+                                with --enable-webrtc)
 
         --experimental-remote-ip=(local|remote|proxy)  select the method for
                              discovering the remote IP address to use for mosh
@@ -167,6 +174,7 @@ GetOptions( 'client=s' => \$client,
 	    'ssh-pty!' => \$ssh_pty,
 	    'init!' => \$term_init,
 	    'local' => \$localhost,
+	    'webrtc' => \$webrtc,
 	    'help' => \$help,
 	    'version' => \$version,
 	    'fake-proxy!' => \my $fake_proxy,
@@ -350,12 +358,24 @@ if ( $use_remote_ip eq 'local' ) {
   $userhost = "$user$ip";
 }
 
+# In WebRTC mode the answer goes back to the server over ssh's stdin.
+my ( $ssh_stdin_r, $ssh_stdin_w );
+if ( defined $webrtc ) {
+  pipe( $ssh_stdin_r, $ssh_stdin_w ) or die "$0: pipe: $!\n";
+}
+
 my $pid = open(my $pipe, "-|");
 die "$0: fork: $!\n" unless ( defined $pid );
 if ( $pid == 0 ) { # child
   open(STDERR, ">&STDOUT") or die;
 
   my @sshopts = ( '-n' );
+  if ( defined $webrtc ) {
+    @sshopts = ();
+    close $ssh_stdin_w;
+    open(STDIN, "<&", $ssh_stdin_r) or die;
+    close $ssh_stdin_r;
+  }
   if ($ssh_pty) {
       push @sshopts, '-tt';
   }
@@ -379,6 +399,10 @@ if ( $pid == 0 ) { # child
   push @server, ( '-c', $colors );
 
   push @server, @bind_arguments;
+
+  if ( defined $webrtc ) {
+    push @server, '--webrtc';
+  }
 
   if ( defined $port_request ) {
     push @server, ( '-p', $port_request );
@@ -410,8 +434,9 @@ if ( $pid == 0 ) { # child
   exec @exec_argv;
   die "Cannot exec ssh: $!\n";
 } else { # parent
-  my ( $sship, $port, $key );
+  my ( $sship, $port, $key, $client_pid );
   my $bad_udp_port_warning = 0;
+  close $ssh_stdin_r if defined $webrtc;
   LINE: while ( <$pipe> ) {
     chomp;
     if ( m{^MOSH IP } ) {
@@ -427,7 +452,13 @@ if ( $pid == 0 ) { # child
 	die "Bad MOSH SSH_CONNECTION string: $_\n";
       }
     } elsif ( m{^MOSH CONNECT } ) {
-      if ( ( $port, $key ) = m{^MOSH CONNECT (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
+      if ( defined $webrtc ) {
+	my $offer;
+	( $key, $offer ) = m{^MOSH CONNECT webrtc ([A-Za-z0-9/+]{22}) (\S+)\s*$}
+	  or die "Bad MOSH CONNECT string: $_\n";
+	$client_pid = webrtc_start_client( $key, $offer );
+	# Keep draining ssh output so that server messages are still shown.
+      } elsif ( ( $port, $key ) = m{^MOSH CONNECT (\d+?) ([A-Za-z0-9/+]{22})\s*$} ) {
 	last LINE;
       } else {
 	die "Bad MOSH CONNECT string: $_\n";
@@ -441,6 +472,14 @@ if ( $pid == 0 ) { # child
   }
   close $pipe;
   waitpid $pid, 0;
+
+  if ( defined $webrtc ) {
+    if ( not defined $client_pid ) {
+      die "$0: Did not find mosh server startup message. (Is mosh-server built with --enable-webrtc?)\n";
+    }
+    waitpid $client_pid, 0;
+    exit( $? >> 8 );
+  }
 
   if ( not defined $ip ) {
     if ( defined $sship ) {
@@ -466,6 +505,38 @@ if ( $pid == 0 ) { # child
 }
 
 sub shell_quote { join ' ', map {(my $a = $_) =~ s/'/'\\''/g; "'$a'"} @_ }
+
+# Starts mosh-client with the server's offer, relays its answer to the
+# server through ssh's stdin and returns the client's pid.
+sub webrtc_start_client {
+  my ( $key, $offer ) = @_;
+
+  my $dir = tempdir( 'mosh-webrtc-XXXXXX', TMPDIR => 1, CLEANUP => 1 );
+  my $fifo = "$dir/answer";
+  mkfifo( $fifo, 0600 ) or die "$0: mkfifo $fifo: $!\n";
+
+  defined( my $client_pid = fork ) or die "$0: fork: $!\n";
+  if ( $client_pid == 0 ) {
+    $ENV{ 'MOSH_KEY' } = $key;
+    $ENV{ 'MOSH_WEBRTC_OFFER' } = $offer;
+    $ENV{ 'MOSH_WEBRTC_ANSWER_FIFO' } = $fifo;
+    $ENV{ 'MOSH_PREDICTION_DISPLAY' } = $predict;
+    $ENV{ 'MOSH_NO_TERM_INIT' } = '1' if !$term_init;
+    exec {$client} ("$client", "-# @cmdline |", '127.0.0.1', '0');
+    die "Cannot exec $client: $!\n";
+  }
+
+  # The client opens the fifo only after its ICE gathering finished; the
+  # server waits on stdin meanwhile, so blocking here is fine.
+  open( my $answer_fh, '<', $fifo ) or die "$0: open $fifo: $!\n";
+  my $answer = <$answer_fh>;
+  close $answer_fh;
+  die "$0: mosh-client did not produce a WebRTC answer.\n" unless defined $answer;
+  chomp $answer;
+  print $ssh_stdin_w "$answer\n";
+  close $ssh_stdin_w or die "$0: writing WebRTC answer to ssh: $!\n";
+  return $client_pid;
+}
 
 sub locale_vars {
   my @names = qw[LANG LANGUAGE LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION LC_ALL];

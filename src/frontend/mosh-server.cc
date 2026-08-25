@@ -420,6 +420,16 @@ static std::unique_ptr<Network::WebRTCBridge> webrtc_handshake( const ServerConn
   printf( "MOSH CONNECT webrtc %s %s\n", network.get_key().c_str(), bridge->local_description().c_str() );
   fflush( stdout );
 
+  /* Over "ssh -tt" stdin is a pty: keep it from echoing the answer back to
+     the client and from truncating it at the canonical-mode line limit. */
+  struct termios tio;
+  if ( tcgetattr( STDIN_FILENO, &tio ) == 0 ) {
+    tio.c_lflag &= static_cast<tcflag_t>( ~( ICANON | ECHO ) );
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+    tcsetattr( STDIN_FILENO, TCSANOW, &tio );
+  }
+
   std::string answer;
   int c;
   while ( ( c = getchar() ) != EOF && c != '\n' ) {
@@ -526,12 +536,31 @@ static int run_server( const char* desired_ip,
   fatal_assert( 0 == sigaction( SIGHUP, &sa, NULL ) );
   fatal_assert( 0 == sigaction( SIGPIPE, &sa, NULL ) );
 
+  /* sshd stops forwarding stdin and tears down the pty as soon as the
+     session's command exits, so in WebRTC mode the parent must stay alive
+     until the child has finished the signaling exchange. The child reports
+     success with one byte; EOF means it died. */
+  int handshake_pipe[2] = { -1, -1 };
+  if ( webrtc && pipe( handshake_pipe ) < 0 ) {
+    perror( "pipe" );
+    exit( 1 );
+  }
+
   /* detach from terminal */
   fflush( NULL );
   pid_t the_pid = fork();
   if ( the_pid < 0 ) {
     perror( "fork" );
   } else if ( the_pid > 0 ) {
+    if ( webrtc ) {
+      close( handshake_pipe[1] );
+      char done;
+      if ( read( handshake_pipe[0], &done, 1 ) != 1 ) {
+        fputs( "mosh-server: WebRTC handshake failed\n", stderr );
+        exit( 1 );
+      }
+      close( handshake_pipe[0] );
+    }
     fputs( "\nmosh-server (" PACKAGE_STRING ") [build " BUILD_VERSION "]\n"
            "Copyright 2012 Keith Winstein <mosh-devel@mit.edu>\n"
            "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>.\n"
@@ -565,7 +594,10 @@ static int run_server( const char* desired_ip,
      the ssh session. */
   std::unique_ptr<Network::WebRTCBridge> bridge;
   if ( webrtc ) {
+    close( handshake_pipe[0] );
     bridge = webrtc_handshake( *network );
+    fatal_assert( write( handshake_pipe[1], "", 1 ) == 1 );
+    close( handshake_pipe[1] );
   }
 #else
   fatal_assert( !webrtc );
