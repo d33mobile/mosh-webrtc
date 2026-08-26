@@ -116,10 +116,12 @@ WebRTC mode
   the server can sit behind NAT without any port forwarding. Mosh keeps
   its own AES-OCB encryption on top of the DTLS-protected channel.
 
-  Build: install [libdatachannel](https://github.com/paullouisageneau/libdatachannel)
-  (`src/tests/webrtc-nat/build-libdatachannel.sh --prefix=DIR` builds the
-  version used by CI) and configure with `--enable-webrtc`. Both the client
-  and the server must be built this way.
+  Build: clone with `--recurse-submodules` (or run
+  `git submodule update --init --recursive`), build the vendored
+  [libdatachannel](https://github.com/paullouisageneau/libdatachannel) with
+  `src/tests/webrtc-nat/build-libdatachannel.sh --prefix=DIR` and configure
+  with `--enable-webrtc`. Both the client and the server must be built this
+  way.
 
     $ mosh --webrtc [user@]host
 

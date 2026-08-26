@@ -3,7 +3,6 @@ name: webrtc
 on: [push, pull_request]
 
 env:
-  LIBDATACHANNEL_COMMIT: 51085b8de4e6185dc019e3705c88b87933d7c3f6
   LIBDATACHANNEL_PREFIX: /home/runner/libdatachannel
 
 jobs:
@@ -13,20 +12,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: install build dependencies
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev libncurses-dev libssl-dev libutempter-dev autoconf automake pkg-config cmake
+
+    - name: libdatachannel submodule commit
+      id: libdatachannel
+      run: echo "commit=$(git -C third_party/libdatachannel rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
     - name: cache libdatachannel
       id: cache-libdatachannel
       uses: actions/cache@v4
       with:
         path: ${{ env.LIBDATACHANNEL_PREFIX }}
-        key: libdatachannel-${{ runner.os }}-${{ env.LIBDATACHANNEL_COMMIT }}-${{ hashFiles('src/tests/webrtc-nat/build-libdatachannel.sh') }}
+        key: libdatachannel-${{ runner.os }}-${{ steps.libdatachannel.outputs.commit }}-${{ hashFiles('src/tests/webrtc-nat/build-libdatachannel.sh') }}
 
     - name: build libdatachannel
       if: steps.cache-libdatachannel.outputs.cache-hit != 'true'
-      run: src/tests/webrtc-nat/build-libdatachannel.sh --commit="$LIBDATACHANNEL_COMMIT" --prefix="$LIBDATACHANNEL_PREFIX"
+      run: src/tests/webrtc-nat/build-libdatachannel.sh --prefix="$LIBDATACHANNEL_PREFIX"
 
     - name: generate build scripts
       run: ./autogen.sh
@@ -60,6 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - uses: docker/setup-buildx-action@v3
 
@@ -89,6 +96,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: build .deb in debian:trixie
       run: |

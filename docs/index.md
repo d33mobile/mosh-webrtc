@@ -59,7 +59,8 @@ that because it has to know the server's public address.
 ## Build from source
 
 ```
-src/tests/webrtc-nat/build-libdatachannel.sh   # or --static
+git clone --recurse-submodules https://github.com/d33mobile/mosh-webrtc2
+src/tests/webrtc-nat/build-libdatachannel.sh --prefix=/usr/local   # or --static
 ./autogen.sh && ./configure --enable-webrtc && make && make check
 ```
 

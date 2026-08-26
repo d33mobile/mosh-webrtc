@@ -1,3 +1,9 @@
+mosh-webrtc (1.4.0+webrtc3) trixie; urgency=medium
+
+  * Build libdatachannel from the vendored submodule.
+
+ -- Claude <jacek+claude@profound.net>  Wed, 26 Aug 2026 12:00:00 +0200
+
 mosh-webrtc (1.4.0+webrtc2) trixie; urgency=medium
 
   * Add MOSH_TURN_SERVER relay fallback.

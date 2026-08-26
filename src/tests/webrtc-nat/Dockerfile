@@ -5,13 +5,14 @@
 # libdatachannel: dependency for the mosh build and (as a shared lib) runtime.
 FROM debian:trixie-slim AS libdatachannel
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git ca-certificates libssl-dev \
+        build-essential cmake libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned to the commit the bridge was developed against (CMake VERSION 0.24.5).
-ARG LIBDATACHANNEL_COMMIT=51085b8de4e6185dc019e3705c88b87933d7c3f6
-COPY src/tests/webrtc-nat/build-libdatachannel.sh /tmp/
-RUN /tmp/build-libdatachannel.sh --commit="${LIBDATACHANNEL_COMMIT}" --prefix=/usr/local
+# Built from the vendored submodule (checked out sources, no git needed).
+WORKDIR /src
+COPY third_party/libdatachannel third_party/libdatachannel
+COPY src/tests/webrtc-nat/build-libdatachannel.sh src/tests/webrtc-nat/
+RUN src/tests/webrtc-nat/build-libdatachannel.sh --prefix=/usr/local
 
 ###############################################################################
 # mosh: build with --enable-webrtc from the repository sources.
@@ -20,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         autoconf automake pkg-config protobuf-compiler libprotobuf-dev \
         libncurses-dev zlib1g-dev perl \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /src
 COPY . .
 RUN ./autogen.sh && ./configure --enable-webrtc && make -j"$(nproc)" && make install
 
