@@ -1,7 +1,7 @@
-# Two NATted LANs joined by an isolated "wan" that only hosts a STUN server.
+# Two NATted LANs joined by an isolated "wan" that only hosts a STUN/TURN server.
 #
 #   client 10.1.0.10 --> nat_client 10.1.0.2 | 10.99.0.2 --> wan <-- 10.99.0.3 | 10.2.0.2 nat_server <-- server 10.2.0.10
-#                                                        stun 10.99.0.10
+#                                                        stun/turn 10.99.0.10
 #
 # The client reaches sshd through a port forward on nat_server's wan address;
 # plain mosh UDP has no such forward, so only WebRTC (STUN + hole punching)
@@ -56,7 +56,12 @@ x-peer: &peer
 services:
   stun:
     image: coturn/coturn:4.6
-    command: turnserver --stun-only -n --listening-port=3478 --listening-ip=10.99.0.10 --log-file=stdout
+    # STUN for the srflx case and TURN (mosh:mosh, realm mosh) for the relay
+    # case. Relay ports need no NAT rule: each peer opens the flow to them
+    # from inside its LAN and the NAT boxes forward LAN-initiated flows.
+    command: turnserver -n --listening-port=3478 --listening-ip=10.99.0.10 --relay-ip=10.99.0.10
+      --realm=mosh --user=mosh:mosh --lt-cred-mech --fingerprint --min-port=49160 --max-port=49200
+      --log-file=stdout
     networks:
       wan:
         ipv4_address: 10.99.0.10

@@ -128,6 +128,26 @@ WebRTC mode
   forward the variable, so set it for the server with
   `--server='MOSH_STUN_SERVER=host:port mosh-server'`.
 
+  When hole punching fails (symmetric NAT, or a jump host that rewrites
+  source ports) ICE can fall back to a TURN relay. Set `MOSH_TURN_SERVER`
+  to `turn:USER:PASS@host:port` (`turns:` and a `?transport=tcp` suffix
+  work too). Both sides read it and the server logs the host and port
+  only, so pass it the same way as the STUN server:
+
+    $ MOSH_TURN_SERVER=turn:mosh:SECRET@turn.example.org:3478 \
+      mosh --webrtc --server='MOSH_TURN_SERVER=turn:mosh:SECRET@turn.example.org:3478 mosh-server' host
+
+  ICE still prefers a direct path; the relay is used only when no other
+  candidate pair works. Setting `MOSH_ICE_TRANSPORT_POLICY=relay` on both
+  sides forces the relay, which is handy for checking the TURN setup. A
+  minimal [coturn](https://github.com/coturn/coturn) on a public host:
+
+    $ turnserver -n --listening-port=3478 --realm=mosh --user=mosh:SECRET \
+        --external-ip=PUBLIC_IP --fingerprint --lt-cred-mech
+
+  Open UDP 3478 and coturn's relay port range (49152-65535 by default,
+  `--min-port`/`--max-port` to narrow it) in the host's firewall.
+
   Signaling runs over the ssh session: `mosh-server` gathers its ICE
   candidates, prints `MOSH CONNECT webrtc KEY OFFER`, and stays attached to
   ssh until `mosh` writes the client's answer to its stdin (or gives up
@@ -139,8 +159,8 @@ WebRTC mode
      sends its description. Connection setup takes about 20 seconds when
      the STUN server is unreachable.
 
-   * No TURN relay: if both sides are behind symmetric NAT the connection
-     fails.
+   * Symmetric NAT on both sides defeats hole punching; the session then
+     needs a TURN relay (`MOSH_TURN_SERVER`) and all traffic goes through it.
 
    * Roaming works only within the ICE session. Once the data channel
      drops, run `mosh --webrtc` again.
@@ -150,7 +170,8 @@ WebRTC mode
   Tests: `make check` runs `webrtc-local.test` (a loopback session through
   the bridge, skipped when built without `--enable-webrtc`);
   `make -C src/tests/webrtc-nat test` runs a docker compose e2e test with
-  both peers behind NAT and a private STUN server. The GitHub Actions
+  both peers behind NAT and a private STUN/TURN server (direct srflx path,
+forced relay path, plain mosh blocked). The GitHub Actions
   workflow `.github/workflows/webrtc.yml` runs both.
 
 Advice to distributors

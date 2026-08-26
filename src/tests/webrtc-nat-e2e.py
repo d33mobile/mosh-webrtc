@@ -3,9 +3,12 @@
 
 1. mosh --webrtc must give a shell (marker echoed, clean exit) and the selected
    ICE pair must use the peer's NATted wan address (srflx/prflx candidate).
-2. Plain mosh to the same host must not connect: the NAT has no UDP forward.
+2. With MOSH_TURN_SERVER set and MOSH_ICE_TRANSPORT_POLICY=relay on both
+   sides the session must go through the TURN relay (both candidates typ relay).
+3. Plain mosh to the same host must not connect: the NAT has no UDP forward.
 """
 
+import os
 import re
 import socket
 import subprocess
@@ -15,10 +18,13 @@ import time
 SSH_HOST = "10.99.0.3"
 SSH_USER = "mosh"
 STUN_SERVER = "10.99.0.10:3478"
+TURN_HOST = "10.99.0.10"
+TURN_SERVER = f"turn:mosh:mosh@{TURN_HOST}:3478"
 WAN_PREFIX = "10.99.0."
 SSHD_WAIT_S = 60
 PLAIN_MOSH_PROMPT_TIMEOUT_S = 20
 DUMP = "/tmp/webrtc-session.out"
+RELAY_DUMP = "/tmp/webrtc-relay-session.out"
 
 SMOKE = ["python3", "/tests/webrtc-ssh-smoke.py", f"--ssh=ssh -o StrictHostKeyChecking=no -i /key",
          "--mosh=/usr/local/bin/mosh", "--client=/usr/local/bin/mosh-client",
@@ -48,20 +54,43 @@ def candidate_uses_wan_address(candidate):
     return typ in (b"srflx", b"prflx") and address.startswith(WAN_PREFIX.encode())
 
 
-def test_webrtc_traverses_nat():
-    log("webrtc session")
+def candidate_is_relay(candidate):
+    fields = candidate.split()
+    address, typ = fields[4], fields[fields.index(b"typ") + 1]
+    return typ == b"relay" and address == TURN_HOST.encode()
+
+
+def run_webrtc_session(dump, server_env="", client_env=None):
     subprocess.run(
-        SMOKE + ["--webrtc", f"--stun={STUN_SERVER}", f"--dump={DUMP}",
-                 f"--server=MOSH_STUN_SERVER={STUN_SERVER} mosh-server"],
+        SMOKE + ["--webrtc", f"--stun={STUN_SERVER}", f"--dump={dump}",
+                 f"--server=MOSH_STUN_SERVER={STUN_SERVER} {server_env} mosh-server"],
         check=True,
+        env=dict(os.environ, **(client_env or {})),
     )
-    with open(DUMP, "rb") as f:
-        output = f.read()
-    pairs = PAIR_RE.findall(output)
+    with open(dump, "rb") as f:
+        pairs = PAIR_RE.findall(f.read())
     log(f"selected candidate pairs: {pairs}")
     assert pairs, "no 'WebRTC: selected candidate pair' line in the session output"
-    for _, remote in pairs:
+    return pairs
+
+
+def test_webrtc_traverses_nat():
+    log("webrtc session")
+    for _, remote in run_webrtc_session(DUMP):
         assert candidate_uses_wan_address(remote), f"remote candidate is not a NATted wan address: {remote!r}"
+
+
+def test_webrtc_relays_through_turn():
+    log("webrtc session forced through the TURN relay")
+    relay_env = {"MOSH_TURN_SERVER": TURN_SERVER, "MOSH_ICE_TRANSPORT_POLICY": "relay"}
+    pairs = run_webrtc_session(
+        RELAY_DUMP,
+        server_env=" ".join(f"{k}={v}" for k, v in relay_env.items()),
+        client_env=relay_env,
+    )
+    for local, remote in pairs:
+        assert candidate_is_relay(local), f"local candidate is not a TURN relay: {local!r}"
+        assert candidate_is_relay(remote), f"remote candidate is not a TURN relay: {remote!r}"
 
 
 def test_plain_mosh_is_blocked():
@@ -81,6 +110,7 @@ def test_plain_mosh_is_blocked():
 def main():
     wait_for_sshd()
     test_webrtc_traverses_nat()
+    test_webrtc_relays_through_turn()
     test_plain_mosh_is_blocked()
     log("PASS")
 

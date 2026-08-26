@@ -54,6 +54,8 @@ using namespace Network;
 
 static const char STUN_SERVER_ENV[] = "MOSH_STUN_SERVER";
 static const char DEFAULT_STUN_SERVER[] = "stun.l.google.com:19302";
+static const char TURN_SERVER_ENV[] = "MOSH_TURN_SERVER";
+static const char ICE_TRANSPORT_POLICY_ENV[] = "MOSH_ICE_TRANSPORT_POLICY";
 static const char CHANNEL_LABEL[] = "mosh";
 
 /* Largest UDP payload the loopback socket can hand us in one read. */
@@ -120,6 +122,23 @@ static std::string stun_server_from_env( void )
   return value;
 }
 
+/* turn:USER:PASS@HOST:PORT, also turns: and ?transport=tcp; parsed by libdatachannel. */
+static void add_turn_server_from_env( rtc::Configuration& config )
+{
+  const char* value = getenv( TURN_SERVER_ENV );
+  if ( value == NULL || *value == '\0' ) {
+    fprintf( stderr, "WebRTCBridge: env %s not set, no relay fallback\n", TURN_SERVER_ENV );
+    return;
+  }
+  rtc::IceServer turn( value );
+  if ( turn.type != rtc::IceServer::Type::Turn ) {
+    throw std::runtime_error( std::string( TURN_SERVER_ENV ) + " must be a turn: or turns: URL" );
+  }
+  fprintf( stderr, "WebRTCBridge: env %s = %s:%u (credentials hidden)\n", TURN_SERVER_ENV, turn.hostname.c_str(),
+           static_cast<unsigned int>( turn.port ) );
+  config.iceServers.push_back( turn );
+}
+
 WebRTCBridge::WebRTCBridge( bool s_offerer )
   : offerer( s_offerer ), pc(), dc(), sock( -1 ), peer(), peer_known( false ), mutex(), cond(),
     gathering_complete( false ), channel_open( false ), reader(), stop_reader( false )
@@ -141,6 +160,12 @@ WebRTCBridge::WebRTCBridge( bool s_offerer )
 
   rtc::Configuration config;
   config.iceServers.emplace_back( "stun:" + stun_server_from_env() );
+  add_turn_server_from_env( config );
+  const char* policy = getenv( ICE_TRANSPORT_POLICY_ENV );
+  if ( policy != NULL && strcmp( policy, "relay" ) == 0 ) {
+    fprintf( stderr, "WebRTCBridge: env %s = relay, using relay candidates only\n", ICE_TRANSPORT_POLICY_ENV );
+    config.iceTransportPolicy = rtc::TransportPolicy::Relay;
+  }
   pc = std::make_shared<rtc::PeerConnection>( config );
 
   pc->onGatheringStateChange( [this]( rtc::PeerConnection::GatheringState state ) {
